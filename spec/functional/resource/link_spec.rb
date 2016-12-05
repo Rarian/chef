@@ -37,6 +37,8 @@ describe Chef::Resource::Link do
     end
   end
 
+  let(:expected_owner) { windows? ? ENV["USERNAME"] : ENV["USER"] }
+
   before do
     FileUtils.mkdir_p(test_file_dir)
   end
@@ -60,6 +62,18 @@ describe Chef::Resource::Link do
     rescue
       puts "Could not remove a file: #{$!}"
     end
+  end
+
+  def node
+    node = Chef::Node.new
+    node.consume_external_attrs(ohai.data, {})
+    node
+  end
+
+  def user(user)
+    usr = Chef::Resource.resource_for_node(:user, node).new(user, run_context)
+    usr.password("ComplexPass11!") if windows?
+    usr
   end
 
   def cleanup_link(path)
@@ -105,6 +119,22 @@ describe Chef::Resource::Link do
       Chef::ReservedNames::Win32::File.link(a, b)
     else
       File.link(a, b)
+    end
+  end
+
+  def chown(file, owner)
+    if windows?
+      Chef::ReservedNames::Win32::Security::SecurableObject.new(file.dup).owner = owner
+    else
+      File.lchown(Etc.getpwnam(owner).uid, Etc.getpwnam(owner).gid, file)
+    end
+  end
+
+  def owner(file)
+    if windows?
+      Chef::ReservedNames::Win32::Security::SecurableObject.new(file.dup).security_descriptor.owner
+    else
+      Etc.getpwuid(File.lstat(file).uid).name
     end
   end
 
@@ -184,6 +214,7 @@ describe Chef::Resource::Link do
         it "links to the target file" do
           expect(symlink?(target_file)).to be_truthy
           expect(readlink(target_file)).to eq(canonicalize(to))
+          expect(owner(target_file)).to eq(expected_owner)
         end
         it "marks the resource updated" do
           expect(resource).to be_updated
@@ -205,6 +236,7 @@ describe Chef::Resource::Link do
         it "leaves the file linked" do
           expect(symlink?(target_file)).to be_truthy
           expect(readlink(target_file)).to eq(canonicalize(to))
+          expect(owner(target_file)).to eq(expected_owner)
         end
         it "does not mark the resource updated" do
           expect(resource).not_to be_updated
@@ -291,13 +323,23 @@ describe Chef::Resource::Link do
               expect(File.exists?(to)).to be_truthy
             end
           end
-          context "pointing somewhere else" do
+          context "pointing somewhere else", :requires_root_or_running_windows do
+            let(:expected_owner) { "test-link-user" }
+            before do
+              user(expected_owner).run_action(:create)
+            end
+            after do
+              user(expected_owner).run_action(:remove)
+            end
             before(:each) do
+              resource.owner("test-link-user")
               @other_target = File.join(test_file_dir, make_tmpname("other_spec"))
               File.open(@other_target, "w") { |file| file.write("eek") }
               symlink(@other_target, target_file)
+              chown(target_file, expected_owner)
               expect(symlink?(target_file)).to be_truthy
               expect(readlink(target_file)).to eq(canonicalize(@other_target))
+              expect(owner(target_file)).to eq(expected_owner)
             end
             after(:each) do
               File.delete(@other_target)
